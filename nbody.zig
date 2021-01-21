@@ -46,14 +46,20 @@ pub fn vector2(comptime value: type) type {
             return a.scale(1.0 / a.magnitude());
         }
         pub fn random(minimum: This, maximum: This, rand: *std.rand.Random) This {
-            var nx = min.x + (maximum.x - minimum.x) * rand.float(value);
-            var ny = min.y + (maximum.y - minimum.y) * rand.float(value);
+            var nx = minimum.x + (maximum.x - minimum.x) * rand.float(value);
+            var ny = minimum.y + (maximum.y - minimum.y) * rand.float(value);
             return .{ .x = nx, .y = ny };
+        }
+        pub fn toRaylib(this: This) ray.Vector2 {
+            var ret: ray.Vector2 = .{ .x = this.x, .y = this.y };
+            // ret.x = this.x;
+            // ret.y = this.y;
+            return ret;
         }
     };
 }
 const v2 = vector2(f32);
-const max_velocity = 30;
+const max_velocity: f32 = 30.0;
 const particle = struct {
     const This = @This();
     position: vector2(f32) = v2{ .x = 0, .y = 0 },
@@ -92,8 +98,10 @@ const particle = struct {
         }
         var total_mass = this.mass + other.mass;
 
-        this.position = this.position.scale(this.mass / total_mass).add(other.position.scale(other.mass / total_mass));
-        this.velocity = this.velocity.scale(this.mass / total_mass).add(other.velocity.scale(other.mass / total_mass));
+        this.position = this.position.scale(this.mass / total_mass).
+            add(other.position.scale(other.mass / total_mass));
+        this.velocity = this.velocity.scale(this.mass / total_mass).
+            add(other.velocity.scale(other.mass / total_mass));
         this.mass += other.mass;
         return true;
     }
@@ -102,6 +110,16 @@ const particle = struct {
         this.position = v2.random(window_start, window_end, rand);
         this.acceleration = .{ .x = 0.0, .y = 0.0 };
         this.velocity = .{ .x = 0.0, .y = 0.0 };
+    }
+    pub fn velocityLine(this: *const This, a: *ray.Vector2, b: *ray.Vector2) void {
+        a.* = this.position.toRaylib();
+        var velocity = this.velocity.normalize().scale((this.velocity.magnitude() / max_velocity) * this.radius());
+        b.* = this.position.add(velocity).toRaylib();
+    }
+    pub fn accelerationLine(this: *const This, a: *ray.Vector2, b: *ray.Vector2) void {
+        a.* = this.position.toRaylib();
+        var acceleration = this.acceleration.normalize().scale(this.radius());
+        b.* = this.position.add(acceleration).toRaylib();
     }
 };
 
@@ -135,6 +153,8 @@ const ParticleCollection = struct {
                 //No self attraction please, allowing that would result in division by zero
                 if (a == b)
                     continue;
+                // This does not result in physically accurate acceleration, but it makes it a lot more
+                // interesting to watch,since it's a lot faster :)
                 a.acceleration = a.acceleration.add(a.attraction(b, this.gravitational_constant));
             }
         }
@@ -157,6 +177,12 @@ const ParticleCollection = struct {
     pub fn drawSystem(this: *const This) void {
         for (this.particles) |p| {
             ray.DrawCircle(@floatToInt(c_int, p.position.x), @floatToInt(c_int, p.position.y), p.radius(), ray.BLACK);
+            var a: ray.Vector2 = ray.Vector2{ .x = 0.0, .y = 0.0 };
+            var b: ray.Vector2 = ray.Vector2{ .x = 0.0, .y = 0.0 };
+            p.velocityLine(&a, &b);
+            ray.DrawLineV(a, b, ray.BLUE);
+            p.accelerationLine(&a, &b);
+            ray.DrawLineV(a, b, ray.RED);
         }
     }
 };
