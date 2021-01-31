@@ -7,7 +7,7 @@ pub fn vector2(comptime value: type) type {
         const This = @This();
         x: value,
         y: value,
-        pub fn add(this: This, other: This) This {
+        pub inline fn add(this: This, other: This) This {
             var t: This = v2{ .x = 0, .y = 0 };
             t = .{ .x = this.x + other.x, .y = this.y + other.y };
             return t;
@@ -15,16 +15,16 @@ pub fn vector2(comptime value: type) type {
         pub fn sub(this: This, other: This) This {
             return this.add(.{ .x = -other.x, .y = -other.y });
         }
-        pub fn scale(this: This, v: value) This {
+        pub inline fn scale(this: This, v: value) This {
             return .{ .x = this.x * v, .y = this.y * v };
         }
-        pub fn distance(this: This, other: This) value {
+        pub inline fn distance(this: This, other: This) value {
             const sqrt = std.math.sqrt;
             const pow = std.math.pow;
             return sqrt(pow(value, this.x - other.x, 2) + pow(value, this.y - other.y, 2));
         }
         //Wrap the value around, like when pacman reaches the edge of the map
-        pub fn wrap(c: This, a: This, b: This) This {
+        pub inline fn wrap(c: This, a: This, b: This) This {
             var r: This = .{ .x = c.x, .y = c.y };
             if (r.x < a.x) {
                 r.x = b.x;
@@ -38,7 +38,7 @@ pub fn vector2(comptime value: type) type {
             }
             return r;
         }
-        pub fn magnitude(a: This) value {
+        pub inline fn magnitude(a: This) value {
             const sqrt = std.math.sqrt;
             return sqrt(a.x * a.x + a.y * a.y);
         }
@@ -86,11 +86,12 @@ const particle = struct {
         this.velocity = this.velocity.add(this.acceleration.scale(timestep));
         if (this.velocity.magnitude() > max_velocity)
             this.velocity = this.velocity.scale(0.9);
+        this.acceleration = .{ .x = 0, .y = 0 };
     }
-    pub fn attraction(this: *const This, other: *const This, g: f32) vector2(f32) {
+    pub inline fn attraction(this: *const This, other: *const This, g: f32) vector2(f32) {
         var dist = this.position.distance(other.position);
         var vector_to = other.position.sub(this.position).normalize();
-        return vector_to.scale(g * (this.mass * other.mass) / std.math.pow(f32, dist, 2));
+        return vector_to.scale(g * (this.mass * other.mass) / std.math.pow(f32, dist, 2)).scale(1.0 / this.mass);
     }
     pub fn absorb(this: *This, other: *const This) bool {
         if (!this.overlaps(other)) {
@@ -100,8 +101,10 @@ const particle = struct {
 
         this.position = this.position.scale(this.mass / total_mass).
             add(other.position.scale(other.mass / total_mass));
-        this.velocity = this.velocity.scale(this.mass / total_mass).
-            add(other.velocity.scale(other.mass / total_mass));
+        this.acceleration = this.acceleration.scale(this.mass / (total_mass)).add(other.acceleration.scale(other.mass / total_mass));
+        this.velocity = this.velocity.scale(this.mass).add(other.velocity.scale(other.mass)).scale(1.0 / total_mass);
+        // this.velocity = this.velocity.scale(this.mass / total_mass).
+        // add(other.velocity.scale(other.mass / total_mass));
         this.mass += other.mass;
         return true;
     }
@@ -116,9 +119,9 @@ const particle = struct {
         var velocity = this.velocity.normalize().scale((this.velocity.magnitude() / max_velocity) * this.radius());
         b.* = this.position.add(velocity).toRaylib();
     }
-    pub fn accelerationLine(this: *const This, a: *ray.Vector2, b: *ray.Vector2) void {
+    pub fn accelerationLine(this: *const This, a: *ray.Vector2, b: *ray.Vector2, timestep: f32) void {
         a.* = this.position.toRaylib();
-        var acceleration = this.acceleration.normalize().scale(this.radius());
+        var acceleration = this.acceleration.normalize().scale(this.radius()).scale(1.0 / timestep);
         b.* = this.position.add(acceleration).toRaylib();
     }
 };
@@ -131,10 +134,10 @@ test "Particle Test" {
 
 const ParticleCollection = struct {
     const This = @This();
-    particles: [100]particle,
+    particles: [150]particle,
     window_start: vector2(f32) = v2{ .x = 0.0, .y = 0.0 },
     window_end: vector2(f32) = v2{ .x = 100, .y = 100 },
-    timestep: f32 = 0.01,
+    timestep: f32 = 1.0 / 60.0,
     gravitational_constant: f32 = 1e-3,
     rand: *std.rand.Random,
     pub fn init_particles(this: *This) void {
@@ -143,22 +146,25 @@ const ParticleCollection = struct {
         }
     }
     pub fn step_world(this: *This) void {
-        for (this.particles) |*p| {
-            p.motion_step(this.timestep);
-            p.position = p.position.wrap(this.window_start, this.window_end);
-        }
+        var i: usize = 0;
         for (this.particles) |*a| {
-            a.acceleration = .{ .x = 0.0, .y = 0.0 };
-            for (this.particles) |*b| {
+            for (this.particles[i + 1 ..]) |*b| {
                 //No self attraction please, allowing that would result in division by zero
                 if (a == b)
                     continue;
                 // This does not result in physically accurate acceleration, but it makes it a lot more
                 // interesting to watch,since it's a lot faster :)
-                a.acceleration = a.acceleration.add(a.attraction(b, this.gravitational_constant));
+                a.acceleration = a.acceleration.add(a.attraction(b, this.gravitational_constant).scale(this.timestep));
+
+                b.acceleration = b.acceleration.add(b.attraction(a, this.gravitational_constant).scale(this.timestep));
             }
+            i += 1;
         }
-        var i: usize = 0;
+        for (this.particles) |*p| {
+            p.motion_step(this.timestep);
+            p.position = p.position.wrap(this.window_start, this.window_end);
+        }
+        i = 0;
         while (i < this.particles.len - 1) {
             var j: usize = i + 1;
             var p1 = &this.particles[i];
@@ -181,8 +187,9 @@ const ParticleCollection = struct {
             var b: ray.Vector2 = ray.Vector2{ .x = 0.0, .y = 0.0 };
             p.velocityLine(&a, &b);
             ray.DrawLineV(a, b, ray.BLUE);
-            p.accelerationLine(&a, &b);
+            p.accelerationLine(&a, &b, this.timestep);
             ray.DrawLineV(a, b, ray.RED);
+            // ray.DrawText(ray.TextFormat("%i", @floatToInt(c_int, p.mass)), @floatToInt(c_int, p.position.x), @floatToInt(c_int, p.position.y), 16, ray.GREEN);
         }
     }
 };
@@ -194,26 +201,35 @@ pub fn main() !void {
     ray.SetTargetFPS(60);
     var iterations: u32 = 1;
     //This is very much *not* good practice, but it's the easiest way to start this
-    var rand = std.rand.Xoroshiro128.init(0);
+    var rand = std.rand.Xoroshiro128.init(@intCast(u64, std.time.milliTimestamp()));
     //Don't initialize the particles yet.
     var p: ParticleCollection = .{ .particles = undefined, .rand = &rand.random };
     p.window_end = .{ .x = width, .y = height };
     p.init_particles();
+    var frame: u32 = 0;
     while (!ray.WindowShouldClose()) {
-        if (ray.GetFrameTime() > (1.0 / 60.0) * 1.5) {
-            iterations = std.math.max(1, iterations - 1);
-        } else {
-            iterations += 1;
+        if (frame % 60 == 0 and frame != 0) {
+            if (ray.GetFrameTime() >= (1.0 / 60.0) * 1.01) {
+                iterations = std.math.max(1, iterations - 1);
+            } else {
+                iterations += 1;
+            }
         }
         var iterations_remaining = iterations;
         while (iterations_remaining > 0) {
             p.step_world();
             iterations_remaining -= 1;
         }
-        // p.step_world();
+
         ray.BeginDrawing();
         defer ray.EndDrawing();
         ray.ClearBackground(ray.RAYWHITE);
         p.drawSystem();
+        var status = ray.TextFormat("FPS: %i, Iterations: %i", ray.GetFPS(), iterations);
+        var status_size = ray.MeasureTextEx(ray.GetFontDefault(), status, 16, 1.0);
+        ray.DrawRectangleV(ray.Vector2{ .x = 100.0, .y = 100.0 }, status_size, ray.GRAY);
+        ray.DrawText(status, 100, 100, 16, ray.BLACK);
+        // p.step_world();
+        frame +%= 1;
     }
 }

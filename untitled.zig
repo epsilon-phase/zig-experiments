@@ -114,7 +114,6 @@ pub fn main() !void {
         try stdout.print("{}\n", .{i});
         i += 1;
     }
-
 }
 test "Testing setting shit" {
     var talloc = std.testing.allocator;
