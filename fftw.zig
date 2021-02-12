@@ -117,7 +117,7 @@ pub fn main() void {
         // initialize_sample_arrays();
         read_pulse_buffer();
         fftw_step_1();
-        interfere();
+        //        interfere();
         fftw_step_2();
         difference();
         // var sample: usize = 0;
