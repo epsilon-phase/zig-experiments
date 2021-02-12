@@ -56,15 +56,38 @@ pub fn vector2(comptime value: type) type {
             // ret.y = this.y;
             return ret;
         }
+        pub const Region = struct {
+            min: This,
+            max: This,
+            pub fn randomInsideRegion(this: @This(), rand: *std.rand.Random) This {
+                return This.random(this.min, this.max, rand);
+            }
+        };
     };
 }
 const v2 = vector2(f32);
 const max_velocity: f32 = 30.0;
+const trail_length = 40;
+const trail_start_color: ray.Color = .{ .r = 255, .b = 0, .g = 0, .a = 255 };
+const trail_end_color: ray.Color = .{ .r = 0, .b = 255, .g = 0, .a = 255 };
+fn color_interpolate(a: ray.Color, b: ray.Color, t: f32) ray.Color {
+    var r: f32 = (@intToFloat(f32, a.r) / 255.0) * (1 - t) + (@intToFloat(f32, b.r) / 255.0) * t;
+    var g: f32 = (@intToFloat(f32, a.g) / 255.0) * (1 - t) + (@intToFloat(f32, b.g) / 255.0) * t;
+    var b1: f32 = (@intToFloat(f32, a.b) / 255.0) * (1 - t) + (@intToFloat(f32, b.b) / 255.0) * t;
+    var col: ray.Color = .{ .r = @floatToInt(u8, r * 255), .g = @floatToInt(u8, g * 255), .b = @floatToInt(u8, b1 * 255), .a = 255 };
+    return col;
+}
+fn trail_color_at_index(index: usize) ray.Color {
+    var t = @intToFloat(f32, index) / trail_length;
+
+    return color_interpolate(trail_start_color, trail_end_color, t);
+}
 const particle = struct {
     const This = @This();
     position: vector2(f32) = v2{ .x = 0, .y = 0 },
     velocity: vector2(f32) = v2{ .x = 0.0, .y = 0.0 },
     acceleration: vector2(f32) = v2{ .x = 0.0, .y = 0.0 },
+    trail: [trail_length]v2 = undefined,
     mass: f32,
     pub fn radius(this: *const This) f32 {
         var result: f32 = std.math.ln(this.mass) / std.math.ln(3.0);
@@ -80,18 +103,34 @@ const particle = struct {
         var dist = this.position.distance(other.position);
         return (r1 + r2) > dist;
     }
+    fn reset_trail(this: *This) void {
+        for (this.trail) |*t| {
+            t.* = this.position;
+        }
+    }
+    fn update_trail(this: *This) void {
+        var i: usize = trail_length - 1;
+        var current: v2 = this.position;
+        for (this.trail) |*t| {
+            var tmp: v2 = t.*;
+            t.* = current;
+            current = tmp;
+        }
+    }
     //Handles the base movement
-    pub fn motion_step(this: *This, timestep: f32) void {
+    pub fn motion_step(this: *This, timestep: f32, g: f32) void {
         this.position = this.position.add(this.velocity.scale(timestep));
-        this.velocity = this.velocity.add(this.acceleration.scale(timestep));
+        this.velocity = this.velocity.add(this.acceleration.scale(g));
         if (this.velocity.magnitude() > max_velocity)
             this.velocity = this.velocity.scale(0.9);
         this.acceleration = .{ .x = 0, .y = 0 };
+        if (this.position.distance(this.trail[0]) > 2)
+            this.update_trail();
     }
     pub inline fn attraction(this: *const This, other: *const This, g: f32) vector2(f32) {
         var dist = this.position.distance(other.position);
         var vector_to = other.position.sub(this.position).normalize();
-        return vector_to.scale(g * (this.mass * other.mass) / std.math.pow(f32, dist, 2)).scale(1.0 / this.mass);
+        return vector_to.scale((this.mass * other.mass) / std.math.pow(f32, dist, 2)).scale(1.0 / this.mass);
     }
     pub fn absorb(this: *This, other: *const This) bool {
         if (!this.overlaps(other)) {
@@ -106,23 +145,44 @@ const particle = struct {
         // this.velocity = this.velocity.scale(this.mass / total_mass).
         // add(other.velocity.scale(other.mass / total_mass));
         this.mass += other.mass;
+        //this.reset_trail();
         return true;
     }
-    pub fn init_particle(this: *This, window_start: v2, window_end: v2, rand: *std.rand.Random) void {
-        this.mass = @intToFloat(f32, rand.intRangeLessThan(i32, 1, 100));
-        this.position = v2.random(window_start, window_end, rand);
+    pub fn init_particle(this: *This, window: v2.Region, velocity: v2.Region, max_mass: f32, rand: *std.rand.Random) void {
+        this.mass = max_mass * rand.float(f32) + 1.0;
+        this.position = window.randomInsideRegion(rand);
         this.acceleration = .{ .x = 0.0, .y = 0.0 };
-        this.velocity = .{ .x = 0.0, .y = 0.0 };
+        //        this.velocity = .{ .x = 0.0, .y = 0.0 };
+        this.velocity = velocity.randomInsideRegion(rand);
+        this.reset_trail();
     }
     pub fn velocityLine(this: *const This, a: *ray.Vector2, b: *ray.Vector2) void {
         a.* = this.position.toRaylib();
         var velocity = this.velocity.normalize().scale((this.velocity.magnitude() / max_velocity) * this.radius());
         b.* = this.position.add(velocity).toRaylib();
     }
-    pub fn accelerationLine(this: *const This, a: *ray.Vector2, b: *ray.Vector2, timestep: f32) void {
+    pub fn accelerationLine(this: *const This, a: *ray.Vector2, b: *ray.Vector2) void {
         a.* = this.position.toRaylib();
-        var acceleration = this.acceleration.normalize().scale(this.radius()).scale(1.0 / timestep);
+        var acceleration = this.acceleration.normalize().scale(this.radius()); //.scale(this.mass).scale(1.0 / timestep);
         b.* = this.position.add(acceleration).toRaylib();
+    }
+    pub fn draw_trail(this: *const This) void {
+        var trail_index: usize = 1;
+        while (trail_index < trail_length) {
+            var dist = this.trail[trail_index].distance(this.trail[trail_index - 1]);
+            if (dist < 100)
+                ray.DrawLineV(this.trail[trail_index].toRaylib(), this.trail[trail_index - 1].toRaylib(), trail_color_at_index(trail_index));
+            trail_index += 1;
+        }
+    }
+    pub fn draw(this: *const This) void {
+        ray.DrawCircleV(this.position.toRaylib(), this.radius(), ray.BLACK);
+        var a: ray.Vector2 = ray.Vector2{ .x = 0.0, .y = 0.0 };
+        var b: ray.Vector2 = ray.Vector2{ .x = 0.0, .y = 0.0 };
+        this.velocityLine(&a, &b);
+        ray.DrawLineV(a, b, ray.BLUE);
+        this.accelerationLine(&a, &b);
+        ray.DrawLineV(a, b, ray.RED);
     }
 };
 
@@ -139,14 +199,26 @@ const ParticleCollection = struct {
     window_end: vector2(f32) = v2{ .x = 100, .y = 100 },
     timestep: f32 = 1.0 / 60.0,
     gravitational_constant: f32 = 1e-3,
+    steps: usize = 0,
     rand: *std.rand.Random,
+    const max_mag = 2.0;
+    const velocity_region: v2.Region = .{ .min = .{ .x = -max_mag, .y = -max_mag / 5.0 }, .max = .{ .x = 0, .y = max_mag / 5.0 } };
     pub fn init_particles(this: *This) void {
         for (this.particles) |*p| {
-            p.init_particle(this.window_start, this.window_end, this.rand);
+            p.init_particle(.{ .min = this.window_start, .max = this.window_end }, This.velocity_region, this.maximum_mass(), this.rand);
         }
+    }
+    fn maximum_mass(this: *const This) f32 {
+        if (this.steps == 0)
+            return 100.0;
+        return 100.0 + std.math.max(0, std.math.log(f32, 2.0, this.particles[0].mass));
     }
     pub fn step_world(this: *This) void {
         var i: usize = 0;
+        for (this.particles) |*p| {
+            p.motion_step(this.timestep, this.gravitational_constant);
+            p.position = p.position.wrap(this.window_start, this.window_end);
+        }
         for (this.particles) |*a| {
             for (this.particles[i + 1 ..]) |*b| {
                 //No self attraction please, allowing that would result in division by zero
@@ -160,10 +232,6 @@ const ParticleCollection = struct {
             }
             i += 1;
         }
-        for (this.particles) |*p| {
-            p.motion_step(this.timestep);
-            p.position = p.position.wrap(this.window_start, this.window_end);
-        }
         i = 0;
         while (i < this.particles.len - 1) {
             var j: usize = i + 1;
@@ -172,23 +240,21 @@ const ParticleCollection = struct {
                 var p2 = &this.particles[j];
                 if (p1.absorb(p2)) {
                     var oldpos = p2.position;
-                    p2.init_particle(this.window_start, this.window_end, this.rand);
+                    p2.init_particle(.{ .min = this.window_start, .max = this.window_end }, This.velocity_region, this.maximum_mass(), this.rand);
                     var newpos = p2.position;
                 }
                 j += 1;
             }
             i += 1;
         }
+        this.steps += 1;
     }
     pub fn drawSystem(this: *const This) void {
         for (this.particles) |p| {
-            ray.DrawCircle(@floatToInt(c_int, p.position.x), @floatToInt(c_int, p.position.y), p.radius(), ray.BLACK);
-            var a: ray.Vector2 = ray.Vector2{ .x = 0.0, .y = 0.0 };
-            var b: ray.Vector2 = ray.Vector2{ .x = 0.0, .y = 0.0 };
-            p.velocityLine(&a, &b);
-            ray.DrawLineV(a, b, ray.BLUE);
-            p.accelerationLine(&a, &b, this.timestep);
-            ray.DrawLineV(a, b, ray.RED);
+            p.draw_trail();
+        }
+        for (this.particles) |p| {
+            p.draw();
             // ray.DrawText(ray.TextFormat("%i", @floatToInt(c_int, p.mass)), @floatToInt(c_int, p.position.x), @floatToInt(c_int, p.position.y), 16, ray.GREEN);
         }
     }
@@ -204,6 +270,7 @@ pub fn main() !void {
     var rand = std.rand.Xoroshiro128.init(@intCast(u64, std.time.milliTimestamp()));
     //Don't initialize the particles yet.
     var p: ParticleCollection = .{ .particles = undefined, .rand = &rand.random };
+    var show_text: bool = true;
     p.window_end = .{ .x = width, .y = height };
     p.init_particles();
     var frame: u32 = 0;
@@ -220,15 +287,26 @@ pub fn main() !void {
             p.step_world();
             iterations_remaining -= 1;
         }
+        if (ray.IsKeyPressed(ray.KEY_T)) {
+            show_text = !show_text;
+        }
+        if (ray.IsKeyPressed(ray.KEY_R)) {
+            p.init_particles();
+            iterations = 0;
+            p.steps = 0;
+            frame = 0;
+        }
 
         ray.BeginDrawing();
         defer ray.EndDrawing();
         ray.ClearBackground(ray.RAYWHITE);
         p.drawSystem();
-        var status = ray.TextFormat("FPS: %i, Iterations: %i", ray.GetFPS(), iterations);
+        var status = ray.TextFormat("FPS: %i, Iterations: %i, total steps: %llu", ray.GetFPS(), iterations, p.steps);
         var status_size = ray.MeasureTextEx(ray.GetFontDefault(), status, 16, 1.0);
-        ray.DrawRectangleV(ray.Vector2{ .x = 100.0, .y = 100.0 }, status_size, ray.GRAY);
-        ray.DrawText(status, 100, 100, 16, ray.BLACK);
+        if (show_text) {
+            ray.DrawRectangleV(ray.Vector2{ .x = 100.0, .y = 100.0 }, status_size, ray.GRAY);
+            ray.DrawText(status, 100, 100, 16, ray.BLACK);
+        }
         // p.step_world();
         frame +%= 1;
     }
