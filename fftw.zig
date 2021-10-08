@@ -44,7 +44,7 @@ fn read_pulse_buffer() void {
     var err: c_int = undefined;
     var ret = pulseaudio.pa_simple_read(pulse_conn_in, &samples, @sizeOf(f32) * SAMPLE_COUNT, &err);
     if (ret != 0) {
-        std.debug.print("Issue! {}\n", .{pulseaudio.pa_strerror(err)});
+        std.debug.print("Issue! {*}\n", .{pulseaudio.pa_strerror(err)});
     }
     var i: usize = 0;
     var avg: f32 = 0.0;

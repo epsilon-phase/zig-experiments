@@ -2,29 +2,47 @@ const std = @import("std");
 const ray = @cImport({
     @cInclude("raylib.h");
 });
+const cmath = @cImport({
+    @cInclude("math.h");
+});
+fn bad_sqrt(x: f32) f32 {
+    return 1 + (x - 1) / 2;
+}
 pub fn vector2(comptime value: type) type {
     return struct {
         const This = @This();
         x: value,
         y: value,
         pub inline fn add(this: This, other: This) This {
+            @setFloatMode(.Optimized);
             var t: This = v2{ .x = 0, .y = 0 };
             t = .{ .x = this.x + other.x, .y = this.y + other.y };
             return t;
         }
-        pub fn sub(this: This, other: This) This {
+        pub inline fn sub(this: This, other: This) This {
             return this.add(.{ .x = -other.x, .y = -other.y });
         }
         pub inline fn scale(this: This, v: value) This {
+            @setFloatMode(.Optimized);
             return .{ .x = this.x * v, .y = this.y * v };
         }
         pub inline fn distance(this: This, other: This) value {
-            const sqrt = std.math.sqrt;
+            @setFloatMode(.Optimized);
+            const sqrt = cmath.sqrtf;
             const pow = std.math.pow;
-            return sqrt(pow(value, this.x - other.x, 2) + pow(value, this.y - other.y, 2));
+            const dx: f32 = this.x - other.x;
+            const dy: f32 = this.y - other.y;
+            return @sqrt(dx * dx + dy * dy);
+        }
+        pub inline fn fast_dist(this: This, other: This) value {
+            @setFloatMode(.Optimized);
+            const dx: f32 = this.x - other.x;
+            const dy: f32 = this.y - other.y;
+            return dx * dx + dy * dy;
         }
         //Wrap the value around, like when pacman reaches the edge of the map
         pub inline fn wrap(c: This, a: This, b: This) This {
+            @setFloatMode(.Optimized);
             var r: This = .{ .x = c.x, .y = c.y };
             if (r.x < a.x) {
                 r.x = b.x;
@@ -39,10 +57,14 @@ pub fn vector2(comptime value: type) type {
             return r;
         }
         pub inline fn magnitude(a: This) value {
+            @setFloatMode(.Optimized);
             const sqrt = std.math.sqrt;
             return sqrt(a.x * a.x + a.y * a.y);
         }
         pub fn normalize(a: This) This {
+            @setFloatMode(.Optimized);
+            if (a.x == 0 and a.y == 0)
+                return .{ .x = 0, .y = 0 };
             return a.scale(1.0 / a.magnitude());
         }
         pub fn random(minimum: This, maximum: This, rand: *std.rand.Random) This {
@@ -89,17 +111,19 @@ const particle = struct {
     acceleration: vector2(f32) = v2{ .x = 0.0, .y = 0.0 },
     trail: [trail_length]v2 = undefined,
     mass: f32,
-    pub fn radius(this: *const This) f32 {
-        var result: f32 = std.math.ln(this.mass) / std.math.ln(3.0);
+    radius: f32,
+    pub fn get_radius(this: *const This) f32 {
+        //var result: f32 = std.math.ln(this.mass) / std.math.ln(3.0);
+        var result: f32 = @log(this.mass) / comptime std.math.ln(3.0);
         if (result > 40) {
-            return 40 - std.math.ln(this.mass) / std.math.ln(5.0);
+            result = 40 - @log(this.mass) / comptime std.math.ln(5.0);
         }
         return result;
     }
     //Returns true if the two particles overlap
     pub fn overlaps(this: *const This, other: *const This) bool {
-        var r1 = this.radius();
-        var r2 = other.radius();
+        var r1 = this.radius;
+        var r2 = other.radius;
         var dist = this.position.distance(other.position);
         return (r1 + r2) > dist;
     }
@@ -124,13 +148,15 @@ const particle = struct {
         if (this.velocity.magnitude() > max_velocity)
             this.velocity = this.velocity.scale(0.9);
         this.acceleration = .{ .x = 0, .y = 0 };
-        if (this.position.distance(this.trail[0]) > 2)
+
+        if (this.position.fast_dist(this.trail[0]) > 4)
             this.update_trail();
     }
     pub inline fn attraction(this: *const This, other: *const This, g: f32) vector2(f32) {
+        @setFloatMode(.Optimized);
         var dist = this.position.distance(other.position);
         var vector_to = other.position.sub(this.position).normalize();
-        return vector_to.scale((this.mass * other.mass) / std.math.pow(f32, dist, 2)).scale(1.0 / this.mass);
+        return vector_to.scale((this.mass * other.mass) / (dist * dist)).scale(g / this.mass);
     }
     pub fn absorb(this: *This, other: *const This) bool {
         if (!this.overlaps(other)) {
@@ -138,13 +164,16 @@ const particle = struct {
         }
         var total_mass = this.mass + other.mass;
 
-        this.position = this.position.scale(this.mass / total_mass).
-            add(other.position.scale(other.mass / total_mass));
-        this.acceleration = this.acceleration.scale(this.mass / (total_mass)).add(other.acceleration.scale(other.mass / total_mass));
+        this.position = this.position.scale(this.mass / total_mass)
+            .add(other.position.scale(other.mass / total_mass));
+        this.acceleration = this.acceleration.scale(this.mass / (total_mass)).add(
+            other.acceleration.scale(other.mass / total_mass),
+        );
         this.velocity = this.velocity.scale(this.mass).add(other.velocity.scale(other.mass)).scale(1.0 / total_mass);
         // this.velocity = this.velocity.scale(this.mass / total_mass).
         // add(other.velocity.scale(other.mass / total_mass));
         this.mass += other.mass;
+        this.radius = this.get_radius();
         //this.reset_trail();
         return true;
     }
@@ -155,15 +184,16 @@ const particle = struct {
         //        this.velocity = .{ .x = 0.0, .y = 0.0 };
         this.velocity = velocity.randomInsideRegion(rand);
         this.reset_trail();
+        this.radius = this.get_radius();
     }
     pub fn velocityLine(this: *const This, a: *ray.Vector2, b: *ray.Vector2) void {
         a.* = this.position.toRaylib();
-        var velocity = this.velocity.normalize().scale((this.velocity.magnitude() / max_velocity) * this.radius());
+        var velocity = this.velocity.normalize().scale((this.velocity.magnitude() / max_velocity) * this.radius);
         b.* = this.position.add(velocity).toRaylib();
     }
     pub fn accelerationLine(this: *const This, a: *ray.Vector2, b: *ray.Vector2) void {
         a.* = this.position.toRaylib();
-        var acceleration = this.acceleration.normalize().scale(this.radius()); //.scale(this.mass).scale(1.0 / timestep);
+        var acceleration = this.acceleration.normalize().scale(this.radius); //.scale(this.mass).scale(1.0 / timestep);
         b.* = this.position.add(acceleration).toRaylib();
     }
     pub fn draw_trail(this: *const This) void {
@@ -175,8 +205,18 @@ const particle = struct {
             trail_index += 1;
         }
     }
+    pub fn draw_mass(this: *const This) void {
+        var msg = ray.TextFormat("%i", @floatToInt(c_int, this.mass));
+        ray.DrawText(
+            msg,
+            @floatToInt(c_int, this.position.x),
+            @floatToInt(c_int, this.position.y),
+            16,
+            ray.GREEN,
+        );
+    }
     pub fn draw(this: *const This) void {
-        ray.DrawCircleV(this.position.toRaylib(), this.radius(), ray.BLACK);
+        ray.DrawCircleV(this.position.toRaylib(), this.radius, ray.BLACK);
         var a: ray.Vector2 = ray.Vector2{ .x = 0.0, .y = 0.0 };
         var b: ray.Vector2 = ray.Vector2{ .x = 0.0, .y = 0.0 };
         this.velocityLine(&a, &b);
@@ -192,6 +232,8 @@ test "Particle Test" {
     std.debug.assert(p1.overlaps(&p2));
 }
 
+const state_t = struct { draw_text: bool = true, draw_mass: bool = false };
+var state: state_t = undefined;
 const ParticleCollection = struct {
     const This = @This();
     particles: [150]particle,
@@ -202,10 +244,15 @@ const ParticleCollection = struct {
     steps: usize = 0,
     rand: *std.rand.Random,
     const max_mag = 2.0;
-    const velocity_region: v2.Region = .{ .min = .{ .x = -max_mag, .y = -max_mag / 5.0 }, .max = .{ .x = 0, .y = max_mag / 5.0 } };
+    const velocity_region: v2.Region = .{ .min = .{ .x = -max_mag, .y = -max_mag / 5.0 }, .max = .{ .x = max_mag, .y = max_mag / 5.0 } };
     pub fn init_particles(this: *This) void {
         for (this.particles) |*p| {
-            p.init_particle(.{ .min = this.window_start, .max = this.window_end }, This.velocity_region, this.maximum_mass(), this.rand);
+            p.init_particle(
+                .{ .min = this.window_start, .max = this.window_end },
+                This.velocity_region,
+                this.maximum_mass(),
+                this.rand,
+            );
         }
     }
     fn maximum_mass(this: *const This) f32 {
@@ -214,6 +261,7 @@ const ParticleCollection = struct {
         return 100.0 + std.math.max(0, std.math.log(f32, 2.0, this.particles[0].mass));
     }
     pub fn step_world(this: *This) void {
+        defer this.steps += 1;
         var i: usize = 0;
         for (this.particles) |*p| {
             p.motion_step(this.timestep, this.gravitational_constant);
@@ -233,21 +281,18 @@ const ParticleCollection = struct {
             i += 1;
         }
         i = 0;
-        while (i < this.particles.len - 1) {
+        while (i < this.particles.len - 1) : (i += 1) {
             var j: usize = i + 1;
             var p1 = &this.particles[i];
-            while (j < this.particles.len) {
+            while (j < this.particles.len) : (j += 1) {
                 var p2 = &this.particles[j];
                 if (p1.absorb(p2)) {
                     var oldpos = p2.position;
                     p2.init_particle(.{ .min = this.window_start, .max = this.window_end }, This.velocity_region, this.maximum_mass(), this.rand);
                     var newpos = p2.position;
                 }
-                j += 1;
             }
-            i += 1;
         }
-        this.steps += 1;
     }
     pub fn drawSystem(this: *const This) void {
         for (this.particles) |p| {
@@ -255,17 +300,19 @@ const ParticleCollection = struct {
         }
         for (this.particles) |p| {
             p.draw();
-            // ray.DrawText(ray.TextFormat("%i", @floatToInt(c_int, p.mass)), @floatToInt(c_int, p.position.x), @floatToInt(c_int, p.position.y), 16, ray.GREEN);
+            if (state.draw_mass) {
+                p.draw_mass();
+            }
         }
     }
 };
-
 pub fn main() !void {
     const width = 800;
     const height = 450;
     ray.InitWindow(width, height, "Nbody");
     ray.SetTargetFPS(60);
     var iterations: u32 = 1;
+    ray.SetConfigFlags(ray.FLAG_MSAA_4X_HINT);
     //This is very much *not* good practice, but it's the easiest way to start this
     var rand = std.rand.Xoroshiro128.init(@intCast(u64, std.time.milliTimestamp()));
     //Don't initialize the particles yet.
@@ -279,7 +326,7 @@ pub fn main() !void {
             if (ray.GetFrameTime() >= (1.0 / 60.0) * 1.01) {
                 iterations = std.math.max(1, iterations - 1);
             } else {
-                iterations += 1;
+                iterations += 5;
             }
         }
         var iterations_remaining = iterations;
@@ -288,7 +335,7 @@ pub fn main() !void {
             iterations_remaining -= 1;
         }
         if (ray.IsKeyPressed(ray.KEY_T)) {
-            show_text = !show_text;
+            state.draw_text = !state.draw_text;
         }
         if (ray.IsKeyPressed(ray.KEY_R)) {
             p.init_particles();
@@ -296,14 +343,23 @@ pub fn main() !void {
             p.steps = 0;
             frame = 0;
         }
+        if (ray.IsKeyPressed(ray.KEY_M)) {
+            state.draw_mass = !state.draw_mass;
+        }
 
         ray.BeginDrawing();
         defer ray.EndDrawing();
         ray.ClearBackground(ray.RAYWHITE);
         p.drawSystem();
-        var status = ray.TextFormat("FPS: %i, Iterations: %i, total steps: %llu", ray.GetFPS(), iterations, p.steps);
-        var status_size = ray.MeasureTextEx(ray.GetFontDefault(), status, 16, 1.0);
-        if (show_text) {
+        if (state.draw_text) {
+            var status = ray.TextFormat(
+                "FPS: %i, Iterations: %i, total steps: %llu \nSimulated Time: %llu seconds",
+                ray.GetFPS(),
+                iterations,
+                p.steps,
+                @floatToInt(u64, std.math.round((@intToFloat(f64, p.steps) / 60.0))),
+            );
+            var status_size = ray.MeasureTextEx(ray.GetFontDefault(), status, 16, 1.0);
             ray.DrawRectangleV(ray.Vector2{ .x = 100.0, .y = 100.0 }, status_size, ray.GRAY);
             ray.DrawText(status, 100, 100, 16, ray.BLACK);
         }
